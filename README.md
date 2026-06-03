@@ -10,19 +10,19 @@ Normally "play online with a friend" needs a server: at minimum a *signaling* se
 
 ## Three modes
 
-- **Играть с другом (P2P)** — direct WebRTC connection via copy-paste codes.
-- **Против компьютера** — single-player vs a minimax AI (corner-weighted heuristic + mobility). You play Black.
-- **Вдвоём на одном устройстве (hotseat)** — two people take turns on the same screen.
+- **Play with a friend (P2P)** — direct WebRTC connection via copy-paste codes.
+- **Play vs computer** — single-player vs a minimax AI (corner-weighted heuristic + mobility). You play Black. Difficulty (search depth) is adjustable.
+- **Two players (same device, hotseat)** — two people take turns on the same screen.
 
 So the game is fully playable and demoable by one person even with no second device.
 
 ## How the copy/paste P2P connection works, step by step
 
-1. **Host** clicks *"Я хост"*. The app generates an **offer code** (its WebRTC offer + gathered ICE candidates, base64-encoded into one pasteable string).
+1. **Host** clicks *"I'm the host"*. The app generates an **offer code** (its WebRTC offer + gathered ICE candidates, base64-encoded into one pasteable string).
 2. Host sends that code to the friend through **any channel** — Telegram, WhatsApp, email, SMS.
-3. **Friend** clicks *"Присоединиться"*, pastes the offer code, and clicks generate. The app produces an **answer code**.
+3. **Friend** clicks *"Join with a code"*, pastes the offer code, and clicks generate. The app produces an **answer code**.
 4. Friend sends the answer code back to the host.
-5. Host pastes the answer code and clicks *"Подключиться"*. The direct `RTCDataChannel` opens and the game begins.
+5. Host pastes the answer code and clicks *"Connect"*. The direct `RTCDataChannel` opens and the game begins.
 
 Host plays **Black** (moves first); the joiner plays **White**. The color is announced over the channel via a `hello` message.
 
@@ -95,7 +95,7 @@ npm test
 - **Manual copy-paste signaling** is a little clunky by design — it's the price of having zero servers. The codes are long because they include ICE candidates.
 - **No reconnect / no persistence.** If the data channel drops, you start a new connection. There is no spectating, matchmaking, or saved games.
 - **The live WebRTC data channel is exercised in a real browser only.** The unit tests cover the pure engine, the message protocol, and the SDP encode/decode — the parts whose correctness can be verified deterministically. The actual RTC handshake itself is integration-tested by playing in a browser, not in the headless unit suite.
-- AI strength is "decent club player," not a championship engine — fixed-depth minimax (default depth 4) with a classic positional heuristic.
+- AI strength is "decent club player," not a championship engine — fixed-depth minimax with a classic positional heuristic. Difficulty is selectable on the menu (Easy / Normal / Hard = depth 2 / 4 / 6).
 
 ## License
 
