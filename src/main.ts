@@ -14,6 +14,7 @@ import {
   winner,
   nextPlayer,
   opponent,
+  undo,
 } from "./engine/reversi.ts";
 import { chooseMove } from "./engine/ai.ts";
 import { PeerConnection, type ConnState } from "./net/connection.ts";
@@ -21,12 +22,20 @@ import { validateReceivedMove, type NetMessage } from "./net/protocol.ts";
 
 type Mode = "menu" | "p2p" | "ai" | "hotseat";
 
+/** A snapshot of the position, used for the undo history stack. */
+interface HistorySnapshot {
+  board: Board;
+  turn: Player | null;
+  lastMove: Position | null;
+}
+
 interface State {
   mode: Mode;
   board: Board;
   turn: Player | null; // null => game over
   lastMove: Position | null;
   flipped: Set<number>; // indices flipped on the last move (for animation)
+  history: HistorySnapshot[]; // positions before each local move (for undo)
   // P2P
   myColor: Player | null; // which color the local human controls (P2P / AI)
   conn: PeerConnection | null;
@@ -43,14 +52,54 @@ const state: State = {
   turn: "B",
   lastMove: null,
   flipped: new Set(),
+  history: [],
   myColor: null,
   conn: null,
   connState: "new",
   aiThinking: false,
 };
 
-const AI_DEPTH = 4;
 const AI_COLOR: Player = "W"; // human is Black by default in vs-computer
+
+// ---------- board theme (persisted) ----------
+
+type Theme = "classic" | "dark" | "contrast";
+const THEMES: { id: Theme; label: string }[] = [
+  { id: "classic", label: "Classic green" },
+  { id: "dark", label: "Dark" },
+  { id: "contrast", label: "High contrast" },
+];
+const THEME_KEY = "p2p-reversi.theme";
+
+function loadTheme(): Theme {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved === "classic" || saved === "dark" || saved === "contrast") return saved;
+  return "classic";
+}
+
+function applyTheme(theme: Theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  localStorage.setItem(THEME_KEY, theme);
+}
+
+let currentTheme: Theme = loadTheme();
+
+// ---------- AI difficulty (search depth, persisted) ----------
+
+const DIFFICULTIES: { id: string; label: string; depth: number }[] = [
+  { id: "easy", label: "Easy", depth: 2 },
+  { id: "normal", label: "Normal", depth: 4 },
+  { id: "hard", label: "Hard", depth: 6 },
+];
+const DIFFICULTY_KEY = "p2p-reversi.difficulty";
+
+function loadDifficultyDepth(): number {
+  const saved = localStorage.getItem(DIFFICULTY_KEY);
+  const found = DIFFICULTIES.find((d) => d.id === saved);
+  return found ? found.depth : 4;
+}
+
+let aiDepth = loadDifficultyDepth();
 
 // ---------- helpers ----------
 
@@ -59,6 +108,41 @@ function resetGame() {
   state.turn = "B";
   state.lastMove = null;
   state.flipped = new Set();
+  state.history = [];
+}
+
+/** True if undo is offered in the current mode (local-only games). */
+function canUndo(): boolean {
+  return (state.mode === "hotseat" || state.mode === "ai") && state.history.length > 0;
+}
+
+/** Push the current position onto the undo stack before a local move is applied. */
+function pushHistory() {
+  state.history.push({
+    board: state.board,
+    turn: state.turn,
+    lastMove: state.lastMove,
+  });
+}
+
+/**
+ * Undo the last local move. In vs-computer mode this rewinds both the AI's
+ * reply and the player's own move, so it is the player's turn again.
+ */
+function undoMove() {
+  if (!canUndo()) return;
+  // In AI mode, the history holds [..., playerMove, aiReply]; undo both so the
+  // human is back on move. In hotseat, undo a single move.
+  const count = state.mode === "ai" ? 2 : 1;
+  const result = undo(state.history, count);
+  if (!result) return;
+  state.board = result.restored.board;
+  state.turn = result.restored.turn;
+  state.lastMove = result.restored.lastMove;
+  state.flipped = new Set();
+  state.history = result.history;
+  state.aiThinking = false;
+  render();
 }
 
 function flippedFor(board: Board, player: Player, pos: Position): Set<number> {
@@ -93,13 +177,16 @@ function advanceTurn(mover: Player) {
   if (next === mover) {
     // opponent had to pass
     const passer = opponent(mover);
-    showToast(`${passer === "B" ? "Чёрные" : "Белые"} пропускают ход (нет ходов)`);
+    showToast(`${passer === "B" ? "Black" : "White"} has no moves and passes`);
   }
 }
 
 // ---------- local move application ----------
 
 function localMakeMove(pos: Position, mover: Player) {
+  // Record the pre-move position for undo (local modes only; undoing a P2P
+  // move would desync the peer, so history is not kept there).
+  if (state.mode === "hotseat" || state.mode === "ai") pushHistory();
   state.flipped = flippedFor(state.board, mover, pos);
   state.board = applyMove(state.board, mover, pos);
   state.lastMove = pos;
@@ -149,7 +236,7 @@ function maybeRunAI() {
     // It may have become a forced-pass-only situation already handled by advanceTurn,
     // but if it's genuinely the AI's turn, play.
     if (state.turn === AI_COLOR) {
-      const move = chooseMove(state.board, AI_COLOR, AI_DEPTH);
+      const move = chooseMove(state.board, AI_COLOR, aiDepth);
       if (move) {
         localMakeMove(move, AI_COLOR);
       }
@@ -175,14 +262,14 @@ function handlePeerMessage(msg: NetMessage) {
       if (state.turn === null) return;
       const check = validateReceivedMove(state.board, state.turn, msg);
       if (!check.ok) {
-        showToast(`Получен некорректный ход от соперника (${check.reason}) — отклонён`);
+        showToast(`Rejected an invalid move from the opponent (${check.reason})`);
         return;
       }
       localMakeMove(check.pos, msg.by);
       break;
     }
     case "resign": {
-      showToast(`Соперник сдался. Победа за вами!`);
+      showToast(`Opponent resigned. You win!`);
       state.turn = null;
       render();
       break;
@@ -190,7 +277,7 @@ function handlePeerMessage(msg: NetMessage) {
     case "newgame":
     case "rematch": {
       resetGame();
-      showToast("Новая партия");
+      showToast("New game");
       render();
       break;
     }
@@ -243,7 +330,7 @@ function renderMenu() {
     el(
       "p",
       "tagline",
-      "Отелло с другом напрямую через WebRTC. Без сервера, без регистрации, бесплатно.",
+      "Play Othello with a friend directly over WebRTC. No server, no sign-up, free.",
     ),
   );
 
@@ -253,20 +340,20 @@ function renderMenu() {
     {
       mode: "p2p",
       emoji: "🔗",
-      title: "Играть с другом (P2P)",
-      sub: "Прямое соединение по ссылке-коду. Сервера нет.",
+      title: "Play with a friend (P2P)",
+      sub: "Direct connection via a copy-paste code. No server.",
     },
     {
       mode: "ai",
       emoji: "🤖",
-      title: "Против компьютера",
-      sub: "Минимакс с оценкой углов. Вы играете чёрными.",
+      title: "Play vs computer",
+      sub: "Corner-weighted minimax. You play Black.",
     },
     {
       mode: "hotseat",
       emoji: "👥",
-      title: "Вдвоём на одном устройстве",
-      sub: "Ходите по очереди на этом экране.",
+      title: "Two players (same device)",
+      sub: "Take turns on this screen.",
     },
   ];
 
@@ -285,21 +372,23 @@ function renderMenu() {
   card.appendChild(modes);
   app.appendChild(card);
 
+  app.appendChild(renderSettingsCard());
+
   const explainerCard = el("div", "card");
   explainerCard.innerHTML = `
     <details class="explainer">
-      <summary>Как работает P2P без сервера?</summary>
+      <summary>How does serverless P2P work?</summary>
       <ol>
-        <li>Хост создаёт «код приглашения» (это его WebRTC-offer, упакованный в base64).</li>
-        <li>Отправляет код другу любым способом (мессенджер, почта).</li>
-        <li>Друг вставляет код и получает «ответный код», шлёт его обратно.</li>
-        <li>Хост вставляет ответ — устанавливается прямой канал RTCDataChannel.</li>
+        <li>The host creates an "invite code" (its WebRTC offer, packed into base64).</li>
+        <li>Sends the code to a friend any way they like (messenger, email).</li>
+        <li>The friend pastes the code, gets an "answer code", and sends it back.</li>
+        <li>The host pastes the answer — a direct RTCDataChannel is established.</li>
       </ol>
-      <p>Для обхода NAT используется бесплатный публичный STUN-сервер Google.
-      Нет ни игрового, ни сигнального сервера: компьютеры обмениваются ходами напрямую.
-      <strong>Важно:</strong> при строгом NAT/симметричном фаерволе без TURN соединение
-      может не установиться (TURN платный, поэтому здесь его нет). В одной сети и на
-      большинстве домашних подключений всё работает.</p>
+      <p>For NAT traversal it uses Google's free public STUN server.
+      There is no game server and no signaling server: the computers exchange moves directly.
+      <strong>Note:</strong> with a strict/symmetric NAT or firewall and no TURN, the connection
+      may fail (TURN costs money, so there is none here). On the same network and on most
+      home connections it just works.</p>
     </details>
   `;
   app.appendChild(explainerCard);
@@ -307,9 +396,48 @@ function renderMenu() {
   app.appendChild(renderFooter());
 }
 
+/** Settings card on the menu: board theme + AI difficulty, both persisted. */
+function renderSettingsCard(): HTMLElement {
+  const card = el("div", "card");
+
+  // Board theme
+  const themeRow = el("div", "settings-row");
+  themeRow.appendChild(el("span", "settings-label", "Board theme"));
+  const themeGroup = el("div", "segmented");
+  for (const t of THEMES) {
+    const b = el("button", `seg-btn${currentTheme === t.id ? " active" : ""}`, t.label);
+    b.onclick = () => {
+      currentTheme = t.id;
+      applyTheme(t.id);
+      render();
+    };
+    themeGroup.appendChild(b);
+  }
+  themeRow.appendChild(themeGroup);
+  card.appendChild(themeRow);
+
+  // AI difficulty
+  const diffRow = el("div", "settings-row");
+  diffRow.appendChild(el("span", "settings-label", "Computer difficulty"));
+  const diffGroup = el("div", "segmented");
+  for (const d of DIFFICULTIES) {
+    const b = el("button", `seg-btn${aiDepth === d.depth ? " active" : ""}`, d.label);
+    b.onclick = () => {
+      aiDepth = d.depth;
+      localStorage.setItem(DIFFICULTY_KEY, d.id);
+      render();
+    };
+    diffGroup.appendChild(b);
+  }
+  diffRow.appendChild(diffGroup);
+  card.appendChild(diffRow);
+
+  return card;
+}
+
 function renderFooter(): HTMLElement {
   const f = el("div", "footer");
-  f.innerHTML = `Движок и протокол полностью покрыты юнит-тестами · MIT · 100% serverless`;
+  f.innerHTML = `Engine and protocol fully covered by unit tests · MIT · 100% serverless`;
   return f;
 }
 
@@ -347,10 +475,10 @@ function backToMenu() {
 function renderP2P() {
   app.innerHTML = "";
   const top = el("div", "topbar");
-  const back = el("button", "btn-ghost", "← Меню");
+  const back = el("button", "btn-ghost", "← Menu");
   back.onclick = backToMenu;
   top.appendChild(back);
-  top.appendChild(el("h1", undefined, "Игра с другом"));
+  top.appendChild(el("h1", undefined, "Play with a friend"));
   app.appendChild(top);
 
   if (state.conn?.isOpen) {
@@ -360,12 +488,12 @@ function renderP2P() {
 
   const card = el("div", "card");
   card.appendChild(
-    el("p", "hint-text", "Выберите роль. Один из вас — Хост, другой — Присоединяется."),
+    el("p", "hint-text", "Pick a role. One of you is the Host, the other Joins."),
   );
   const row = el("div", "row gap-top");
-  const hostBtn = el("button", "btn-primary", "Я хост (создать игру)");
+  const hostBtn = el("button", "btn-primary", "I'm the host (create game)");
   hostBtn.onclick = renderHostFlow;
-  const joinBtn = el("button", "btn-accent", "Присоединиться по коду");
+  const joinBtn = el("button", "btn-accent", "Join with a code");
   joinBtn.onclick = renderJoinFlow;
   row.appendChild(hostBtn);
   row.appendChild(joinBtn);
@@ -383,11 +511,11 @@ function statusEl(): HTMLElement {
         ? "connecting"
         : "failed";
   const labels: Record<string, string> = {
-    new: "ожидание соединения…",
-    connecting: "соединение…",
-    connected: "соединено",
-    disconnected: "соединение потеряно",
-    failed: "не удалось соединиться (возможно строгий NAT без TURN)",
+    new: "waiting for connection…",
+    connecting: "connecting…",
+    connected: "connected",
+    disconnected: "connection lost",
+    failed: "could not connect (possibly a strict NAT without TURN)",
   };
   const s = el("div", `status ${cls}`);
   s.appendChild(el("span", "dot"));
@@ -396,7 +524,7 @@ function statusEl(): HTMLElement {
 }
 
 function copyButton(getText: () => string): HTMLButtonElement {
-  const btn = el("button", "btn-primary", "📋 Копировать") as HTMLButtonElement;
+  const btn = el("button", "btn-primary", "📋 Copy") as HTMLButtonElement;
   btn.onclick = async () => {
     const text = getText();
     try {
@@ -411,7 +539,7 @@ function copyButton(getText: () => string): HTMLButtonElement {
       ta.remove();
     }
     const prev = btn.textContent;
-    btn.textContent = "✓ Скопировано";
+    btn.textContent = "✓ Copied";
     btn.classList.add("copied");
     setTimeout(() => {
       btn.textContent = prev;
@@ -427,31 +555,31 @@ async function renderHostFlow() {
 
   app.innerHTML = "";
   const top = el("div", "topbar");
-  const back = el("button", "btn-ghost", "← Назад");
+  const back = el("button", "btn-ghost", "← Back");
   back.onclick = () => {
     state.conn?.close();
     state.conn = null;
     renderP2P();
   };
   top.appendChild(back);
-  top.appendChild(el("h1", undefined, "Хост"));
+  top.appendChild(el("h1", undefined, "Host"));
   app.appendChild(top);
 
   const card = el("div", "card");
   card.appendChild(statusEl());
   card.appendChild(
-    el("p", "hint-text", "Вы играете чёрными (ходите первым). Генерируем код приглашения…"),
+    el("p", "hint-text", "You play Black (move first). Generating an invite code…"),
   );
 
   // Step 1: offer
   const step1 = el("div", "step");
   const lbl1 = el("div", "step-label");
   lbl1.appendChild(el("span", "step-num", "1"));
-  lbl1.appendChild(document.createTextNode("Скопируйте код приглашения и отправьте другу"));
+  lbl1.appendChild(document.createTextNode("Copy the invite code and send it to your friend"));
   step1.appendChild(lbl1);
   const offerBox = el("textarea", "code-box") as HTMLTextAreaElement;
   offerBox.readOnly = true;
-  offerBox.value = "Генерация…";
+  offerBox.value = "Generating…";
   step1.appendChild(offerBox);
   const r1 = el("div", "row gap-top");
   r1.appendChild(copyButton(() => offerBox.value));
@@ -462,17 +590,17 @@ async function renderHostFlow() {
   const step2 = el("div", "step");
   const lbl2 = el("div", "step-label");
   lbl2.appendChild(el("span", "step-num", "2"));
-  lbl2.appendChild(document.createTextNode("Вставьте ответный код от друга"));
+  lbl2.appendChild(document.createTextNode("Paste the answer code from your friend"));
   step2.appendChild(lbl2);
   const answerBox = el("textarea", "code-box") as HTMLTextAreaElement;
-  answerBox.placeholder = "Сюда вставьте ответный код…";
+  answerBox.placeholder = "Paste the answer code here…";
   step2.appendChild(answerBox);
   const r2 = el("div", "row gap-top");
-  const connectBtn = el("button", "btn-accent", "Подключиться") as HTMLButtonElement;
+  const connectBtn = el("button", "btn-accent", "Connect") as HTMLButtonElement;
   connectBtn.onclick = async () => {
     try {
       connectBtn.disabled = true;
-      connectBtn.textContent = "Подключение…";
+      connectBtn.textContent = "Connecting…";
       await state.conn!.acceptAnswer(answerBox.value);
       // hello so the joiner learns the host color
       const waitOpen = setInterval(() => {
@@ -483,9 +611,9 @@ async function renderHostFlow() {
         }
       }, 200);
     } catch (e) {
-      showToast("Не удалось разобрать ответный код");
+      showToast("Could not parse the answer code");
       connectBtn.disabled = false;
-      connectBtn.textContent = "Подключиться";
+      connectBtn.textContent = "Connect";
     }
   };
   r2.appendChild(connectBtn);
@@ -498,7 +626,7 @@ async function renderHostFlow() {
     const offer = await state.conn.createOffer();
     offerBox.value = offer;
   } catch (e) {
-    offerBox.value = "Ошибка генерации offer: " + (e as Error).message;
+    offerBox.value = "Failed to generate offer: " + (e as Error).message;
   }
 }
 
@@ -508,14 +636,14 @@ function renderJoinFlow() {
 
   app.innerHTML = "";
   const top = el("div", "topbar");
-  const back = el("button", "btn-ghost", "← Назад");
+  const back = el("button", "btn-ghost", "← Back");
   back.onclick = () => {
     state.conn?.close();
     state.conn = null;
     renderP2P();
   };
   top.appendChild(back);
-  top.appendChild(el("h1", undefined, "Присоединиться"));
+  top.appendChild(el("h1", undefined, "Join"));
   app.appendChild(top);
 
   const card = el("div", "card");
@@ -525,13 +653,13 @@ function renderJoinFlow() {
   const step1 = el("div", "step");
   const lbl1 = el("div", "step-label");
   lbl1.appendChild(el("span", "step-num", "1"));
-  lbl1.appendChild(document.createTextNode("Вставьте код приглашения от хоста"));
+  lbl1.appendChild(document.createTextNode("Paste the invite code from the host"));
   step1.appendChild(lbl1);
   const offerBox = el("textarea", "code-box") as HTMLTextAreaElement;
-  offerBox.placeholder = "Сюда вставьте код приглашения…";
+  offerBox.placeholder = "Paste the invite code here…";
   step1.appendChild(offerBox);
   const r1 = el("div", "row gap-top");
-  const genBtn = el("button", "btn-primary", "Сгенерировать ответ") as HTMLButtonElement;
+  const genBtn = el("button", "btn-primary", "Generate answer") as HTMLButtonElement;
   r1.appendChild(genBtn);
   step1.appendChild(r1);
   card.appendChild(step1);
@@ -540,11 +668,11 @@ function renderJoinFlow() {
   const step2 = el("div", "step");
   const lbl2 = el("div", "step-label");
   lbl2.appendChild(el("span", "step-num", "2"));
-  lbl2.appendChild(document.createTextNode("Скопируйте ответный код и пошлите хосту"));
+  lbl2.appendChild(document.createTextNode("Copy the answer code and send it to the host"));
   step2.appendChild(lbl2);
   const answerBox = el("textarea", "code-box") as HTMLTextAreaElement;
   answerBox.readOnly = true;
-  answerBox.placeholder = "Ответный код появится здесь…";
+  answerBox.placeholder = "The answer code will appear here…";
   step2.appendChild(answerBox);
   const r2 = el("div", "row gap-top");
   r2.appendChild(copyButton(() => answerBox.value));
@@ -552,20 +680,20 @@ function renderJoinFlow() {
   card.appendChild(step2);
 
   card.appendChild(
-    el("p", "hint-text", "Вы играете белыми. Как только хост вставит ответ — начнётся игра."),
+    el("p", "hint-text", "You play White. The game starts as soon as the host pastes your answer."),
   );
 
   genBtn.onclick = async () => {
     try {
       genBtn.disabled = true;
-      genBtn.textContent = "Генерация…";
+      genBtn.textContent = "Generating…";
       const answer = await state.conn!.acceptOffer(offerBox.value);
       answerBox.value = answer;
-      genBtn.textContent = "Готово ✓";
+      genBtn.textContent = "Done ✓";
     } catch (e) {
-      showToast("Не удалось разобрать код приглашения");
+      showToast("Could not parse the invite code");
       genBtn.disabled = false;
-      genBtn.textContent = "Сгенерировать ответ";
+      genBtn.textContent = "Generate answer";
     }
   };
 
@@ -578,9 +706,16 @@ function renderGame() {
   app.innerHTML = "";
 
   const top = el("div", "topbar");
-  const back = el("button", "btn-ghost", "← Меню");
+  const back = el("button", "btn-ghost", "← Menu");
   back.onclick = backToMenu;
   top.appendChild(back);
+
+  if (state.mode === "hotseat" || state.mode === "ai") {
+    const undoBtn = el("button", "btn-ghost", "↶ Undo") as HTMLButtonElement;
+    undoBtn.disabled = !canUndo();
+    undoBtn.onclick = undoMove;
+    top.appendChild(undoBtn);
+  }
 
   const s = score(state.board);
   const sb = el("div", "scoreboard");
@@ -647,33 +782,39 @@ function isMyTurn(): boolean {
 }
 
 function colorName(p: Player): string {
-  return p === "B" ? "Чёрные" : "Белые";
+  return p === "B" ? "Black" : "White";
+}
+
+/** Number of moves played so far (4 starting discs are not moves). */
+function moveNumber(): number {
+  const s = score(state.board);
+  return s.B + s.W - 4;
 }
 
 function renderStatusLine(): HTMLElement {
   const line = el("div", "status");
   if (state.turn === null) {
-    line.textContent = "Партия окончена.";
+    line.textContent = "Game over.";
     return line;
   }
 
   let text = "";
   if (state.mode === "hotseat") {
-    text = `Ход: ${colorName(state.turn)}`;
+    text = `Turn: ${colorName(state.turn)}`;
   } else if (state.mode === "ai") {
-    if (state.aiThinking) text = "Компьютер думает…";
-    else text = state.turn === state.myColor ? "Ваш ход (чёрные)" : "Ход компьютера";
+    if (state.aiThinking) text = "Computer is thinking…";
+    else text = state.turn === state.myColor ? "Your move (Black)" : "Computer's move";
   } else if (state.mode === "p2p") {
-    const me = state.myColor ? `вы — ${colorName(state.myColor)}` : "";
+    const me = state.myColor ? `you are ${colorName(state.myColor)}` : "";
     if (!state.conn?.isOpen) {
-      text = "Соединение…";
+      text = "Connecting…";
     } else if (state.turn === state.myColor) {
-      text = `Ваш ход (${me})`;
+      text = `Your move (${me})`;
     } else {
-      text = `Ход соперника · ${me}`;
+      text = `Opponent's move · ${me}`;
     }
   }
-  line.textContent = text;
+  line.textContent = `${text} · move ${moveNumber()}`;
   return line;
 }
 
@@ -683,22 +824,22 @@ function renderGameOverBanner(): HTMLElement {
   const w = winner(state.board);
   const left = el("div");
   let title = "";
-  if (w === "draw") title = `Ничья ${s.B}:${s.W}`;
-  else title = `Победа: ${colorName(w)} ${Math.max(s.B, s.W)}:${Math.min(s.B, s.W)}`;
+  if (w === "draw") title = `Draw ${s.B}:${s.W}`;
+  else title = `${colorName(w)} wins ${Math.max(s.B, s.W)}:${Math.min(s.B, s.W)}`;
   left.appendChild(el("div", "banner-title", title));
 
   let sub = "";
   if (state.mode === "ai") {
-    if (w === state.myColor) sub = "Вы обыграли компьютер!";
-    else if (w === "draw") sub = "Равная игра.";
-    else sub = "Компьютер сильнее в этот раз.";
+    if (w === state.myColor) sub = "You beat the computer!";
+    else if (w === "draw") sub = "An even game.";
+    else sub = "The computer was stronger this time.";
   } else if (state.mode === "p2p") {
-    sub = w === state.myColor ? "Вы победили!" : w === "draw" ? "Ничья." : "Соперник победил.";
+    sub = w === state.myColor ? "You win!" : w === "draw" ? "A draw." : "Your opponent wins.";
   }
   if (sub) left.appendChild(el("div", "banner-sub", sub));
   banner.appendChild(left);
 
-  const rematch = el("button", "btn-accent", "Реванш");
+  const rematch = el("button", "btn-accent", "Rematch");
   rematch.onclick = () => {
     resetGame();
     if (state.mode === "p2p" && state.conn?.isOpen) {
@@ -713,4 +854,5 @@ function renderGameOverBanner(): HTMLElement {
 
 // ---------- boot ----------
 
+applyTheme(currentTheme);
 render();

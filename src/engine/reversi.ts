@@ -165,3 +165,31 @@ export function nextPlayer(board: Board, justMoved: Player): Player | null {
   if (!mustPass(board, justMoved)) return justMoved;
   return null; // game over
 }
+
+/** A snapshot of the game position, used for an undo history stack. */
+export interface GameSnapshot {
+  board: Board;
+  turn: Player | null;
+  lastMove: Position | null;
+}
+
+/**
+ * Pop the most recent snapshot off a history stack, returning the restored
+ * position and the remaining history. Pure: does not mutate its inputs.
+ *
+ * When `count` snapshots should be undone at once (e.g. undoing both the AI's
+ * reply and the player's move in vs-computer mode), pass `count > 1`. The number
+ * of pops is clamped to the available history length.
+ *
+ * Returns `null` when there is nothing to undo.
+ */
+export function undo(
+  history: ReadonlyArray<GameSnapshot>,
+  count = 1,
+): { restored: GameSnapshot; history: GameSnapshot[] } | null {
+  if (history.length === 0) return null;
+  const pops = Math.min(Math.max(count, 1), history.length);
+  const remaining = history.slice(0, history.length - pops);
+  const restored = history[history.length - pops];
+  return { restored, history: remaining };
+}

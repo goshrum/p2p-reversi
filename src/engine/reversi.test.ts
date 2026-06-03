@@ -17,6 +17,8 @@ import {
   score,
   winner,
   nextPlayer,
+  undo,
+  type GameSnapshot,
 } from "./reversi.ts";
 
 /** Build a board from an 8x8 string layout: '.' empty, 'B' black, 'W' white. */
@@ -432,5 +434,69 @@ describe("full game playthrough invariants", () => {
     expect(s.B + s.W).toBeGreaterThanOrEqual(4);
     expect(s.B + s.W).toBeLessThanOrEqual(64);
     expect(["B", "W", "draw"]).toContain(winner(board));
+  });
+});
+
+describe("undo (history stack)", () => {
+  function snap(turn: Player | null): GameSnapshot {
+    return { board: createInitialBoard(), turn, lastMove: null };
+  }
+
+  it("returns null for empty history", () => {
+    expect(undo([])).toBeNull();
+    expect(undo([], 3)).toBeNull();
+  });
+
+  it("pops the last snapshot and returns the rest", () => {
+    const a = snap("B");
+    const b = snap("W");
+    const result = undo([a, b]);
+    expect(result).not.toBeNull();
+    expect(result!.restored).toBe(b);
+    expect(result!.history).toEqual([a]);
+  });
+
+  it("undoes multiple snapshots at once (count > 1)", () => {
+    const a = snap("B");
+    const b = snap("W");
+    const c = snap("B");
+    const result = undo([a, b, c], 2);
+    expect(result!.restored).toBe(b);
+    expect(result!.history).toEqual([a]);
+  });
+
+  it("clamps count to the available history length", () => {
+    const a = snap("B");
+    const b = snap("W");
+    const result = undo([a, b], 5);
+    expect(result!.restored).toBe(a);
+    expect(result!.history).toEqual([]);
+  });
+
+  it("treats count < 1 as a single pop", () => {
+    const a = snap("B");
+    const b = snap("W");
+    const result = undo([a, b], 0);
+    expect(result!.restored).toBe(b);
+    expect(result!.history).toEqual([a]);
+  });
+
+  it("does not mutate the input history", () => {
+    const a = snap("B");
+    const b = snap("W");
+    const input = [a, b];
+    undo(input, 1);
+    expect(input).toEqual([a, b]);
+    expect(input.length).toBe(2);
+  });
+
+  it("round-trips a real move: play then undo restores the prior position", () => {
+    const before = createInitialBoard();
+    const history: GameSnapshot[] = [{ board: before, turn: "B", lastMove: null }];
+    const after = applyMove(before, "B", { row: 2, col: 3 });
+    expect(score(after).B + score(after).W).toBe(5);
+    const result = undo(history, 1)!;
+    expect(result.restored.board).toEqual(before);
+    expect(result.restored.turn).toBe("B");
   });
 });
