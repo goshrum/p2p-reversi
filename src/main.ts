@@ -16,7 +16,7 @@ import {
   opponent,
   undo,
 } from "./engine/reversi.ts";
-import { chooseMove } from "./engine/ai.ts";
+import { chooseMove, bestMoveFor } from "./engine/ai.ts";
 import { PeerConnection, type ConnState } from "./net/connection.ts";
 import { validateReceivedMove, type NetMessage } from "./net/protocol.ts";
 
@@ -42,6 +42,9 @@ interface State {
   connState: ConnState;
   // AI
   aiThinking: boolean;
+  // Hint (local modes only): the suggested square to highlight, plus a counter.
+  hint: Position | null;
+  hintCount: number;
 }
 
 const app = document.getElementById("app")!;
@@ -57,6 +60,8 @@ const state: State = {
   conn: null,
   connState: "new",
   aiThinking: false,
+  hint: null,
+  hintCount: 0,
 };
 
 const AI_COLOR: Player = "W"; // human is Black by default in vs-computer
@@ -109,6 +114,42 @@ function resetGame() {
   state.lastMove = null;
   state.flipped = new Set();
   state.history = [];
+  state.hint = null;
+  state.hintCount = 0;
+}
+
+/**
+ * Hints are offered only in the single-device modes. In P2P they would be
+ * unfair and could desync the opponent's view, so the button is hidden there.
+ */
+function hintsEnabled(): boolean {
+  return state.mode === "hotseat" || state.mode === "ai";
+}
+
+/** Clear any active hint highlight (called on a new move or a fresh hint). */
+function clearHint() {
+  state.hint = null;
+}
+
+/**
+ * Compute and highlight the best move for the side currently to move, reusing
+ * the engine. Clicking again recomputes (and so clears the old marker first).
+ * Does NOT make the move. No-op when it isn't a hintable human turn.
+ */
+function requestHint() {
+  if (!hintsEnabled()) return;
+  if (state.turn === null) return;
+  if (state.mode === "ai" && (state.turn !== state.myColor || state.aiThinking)) return;
+  const suggestion = bestMoveFor(state.board, state.turn, aiDepth);
+  if (!suggestion) {
+    showToast("No move available — you must pass");
+    state.hint = null;
+    render();
+    return;
+  }
+  state.hint = suggestion;
+  state.hintCount++;
+  render();
 }
 
 /** True if undo is offered in the current mode (local-only games). */
@@ -142,6 +183,7 @@ function undoMove() {
   state.flipped = new Set();
   state.history = result.history;
   state.aiThinking = false;
+  clearHint();
   render();
 }
 
@@ -187,6 +229,7 @@ function localMakeMove(pos: Position, mover: Player) {
   // Record the pre-move position for undo (local modes only; undoing a P2P
   // move would desync the peer, so history is not kept there).
   if (state.mode === "hotseat" || state.mode === "ai") pushHistory();
+  clearHint();
   state.flipped = flippedFor(state.board, mover, pos);
   state.board = applyMove(state.board, mover, pos);
   state.lastMove = pos;
@@ -715,6 +758,14 @@ function renderGame() {
     undoBtn.disabled = !canUndo();
     undoBtn.onclick = undoMove;
     top.appendChild(undoBtn);
+
+    // Hint: highlight the engine's suggested move without playing it.
+    const label = state.hintCount > 0 ? `💡 Hint (${state.hintCount})` : "💡 Hint";
+    const hintBtn = el("button", "btn-ghost", label) as HTMLButtonElement;
+    hintBtn.disabled = !isMyTurn();
+    hintBtn.title = "Highlight the move the AI considers best (does not play it)";
+    hintBtn.onclick = requestHint;
+    top.appendChild(hintBtn);
   }
 
   const s = score(state.board);
@@ -755,6 +806,8 @@ function renderGame() {
         state.lastMove && state.lastMove.row === r && state.lastMove.col === c;
       if (isLast) cell.classList.add("last");
 
+      const isHint = state.hint && state.hint.row === r && state.hint.col === c;
+
       if (occupant) {
         const disc = el("div", `disc ${occupant}`);
         if (state.flipped.has(i)) disc.classList.add("flip");
@@ -762,6 +815,10 @@ function renderGame() {
       } else if (myTurn && moveSet.has(i)) {
         cell.classList.add("playable");
         cell.appendChild(el("div", "hint"));
+        if (isHint) {
+          cell.classList.add("suggested");
+          cell.appendChild(el("div", "suggest-marker"));
+        }
         cell.onclick = () => onCellClick({ row: r, col: c });
       }
       boardEl.appendChild(cell);

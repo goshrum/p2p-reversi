@@ -295,6 +295,43 @@ button:disabled {
   transform: scale(1.35);
 }
 
+/* ---- Suggested move (Hint) ---- */
+.cell.suggested::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--accent-2);
+  border-radius: 3px;
+  pointer-events: none;
+}
+.suggest-marker {
+  position: absolute;
+  width: 60%;
+  height: 60%;
+  border-radius: 50%;
+  border: 3px solid var(--accent-2);
+  box-shadow: 0 0 8px var(--accent-2);
+  pointer-events: none;
+  animation: suggestPulse 1s ease-in-out infinite;
+}
+@keyframes suggestPulse {
+  0%,
+  100% {
+    transform: scale(0.78);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .suggest-marker {
+    animation: none;
+    opacity: 0.9;
+  }
+}
+
 .disc {
   width: 82%;
   height: 82%;
