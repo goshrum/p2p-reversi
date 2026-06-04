@@ -123,3 +123,14 @@ export function chooseMove(board: Board, player: Player, depth = 3): Position | 
 
   return bestMove;
 }
+
+/**
+ * Suggest the best move for `player` at the given search depth — the move a
+ * "Hint" feature should highlight. This is a thin, intention-revealing alias
+ * over {@link chooseMove}: it returns exactly the move the engine would play,
+ * so a hint can never disagree with the computer opponent. Returns null when
+ * the player has no legal move (the caller should treat that as "must pass").
+ */
+export function bestMoveFor(board: Board, player: Player, depth = 3): Position | null {
+  return chooseMove(board, player, depth);
+}

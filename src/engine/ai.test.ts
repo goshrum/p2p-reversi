@@ -8,7 +8,7 @@ import {
   isGameOver,
   type Player,
 } from "./reversi.ts";
-import { chooseMove, evaluate } from "./ai.ts";
+import { chooseMove, evaluate, bestMoveFor } from "./ai.ts";
 
 describe("AI chooseMove", () => {
   it("returns a legal move from the opening position", () => {
@@ -78,5 +78,49 @@ describe("AI evaluate", () => {
     const xsq = createInitialBoard();
     xsq[9] = "B"; // b2 X-square (dangerous)
     expect(evaluate(corner, "B")).toBeGreaterThan(evaluate(xsq, "B"));
+  });
+});
+
+describe("AI bestMoveFor (hint helper)", () => {
+  it("returns a legal move from the opening position", () => {
+    const b = createInitialBoard();
+    const move = bestMoveFor(b, "B", 3);
+    expect(move).not.toBeNull();
+    expect(isLegalMove(b, "B", move!)).toBe(true);
+  });
+
+  it("returns null when the player has no legal move (must pass)", () => {
+    const full = createInitialBoard().map(() => "B" as Player);
+    expect(bestMoveFor(full, "W", 2)).toBeNull();
+  });
+
+  it("matches the engine's chooseMove on fixed positions and depths", () => {
+    const positions: { board: ReturnType<typeof createInitialBoard>; player: Player; depth: number }[] = [];
+
+    // Opening position, both colors, several depths.
+    for (const depth of [1, 2, 3, 4]) {
+      positions.push({ board: createInitialBoard(), player: "B", depth });
+      positions.push({ board: createInitialBoard(), player: "W", depth });
+    }
+
+    // A crafted corner-grab position.
+    const corner = createInitialBoard();
+    corner[0] = null;
+    corner[1] = "W";
+    corner[2] = "B";
+    positions.push({ board: corner, player: "B", depth: 2 });
+    positions.push({ board: corner, player: "B", depth: 4 });
+
+    for (const { board, player, depth } of positions) {
+      expect(bestMoveFor(board, player, depth)).toEqual(chooseMove(board, player, depth));
+    }
+  });
+
+  it("suggests grabbing an available corner", () => {
+    const board = createInitialBoard();
+    board[0] = null;
+    board[1] = "W";
+    board[2] = "B";
+    expect(bestMoveFor(board, "B", 2)).toEqual({ row: 0, col: 0 });
   });
 });
