@@ -539,3 +539,50 @@ button:disabled {
   background: var(--accent);
   color: #fff;
 }
+
+/* ---- Resume button + scoreboard (menu) ---- */
+.resume-btn {
+  width: 100%;
+  border: 1px solid var(--accent-2);
+}
+.scoreboard-card .tallies {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+.scoreboard-card .tally {
+  flex: 1;
+  text-align: center;
+  background: var(--bg-elev-2);
+  border-radius: 10px;
+  padding: 10px 6px;
+}
+.scoreboard-card .tally-num {
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1;
+}
+.scoreboard-card .tally.win .tally-num {
+  color: var(--accent-2);
+}
+.scoreboard-card .tally.loss .tally-num {
+  color: var(--danger);
+}
+.scoreboard-card .tally.draw .tally-num {
+  color: var(--text-dim);
+}
+.scoreboard-card .tally-label {
+  margin-top: 4px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+.score-breakdown {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.score-breakdown-row {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}

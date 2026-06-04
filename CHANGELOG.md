@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Resume last game** in single-device modes. The current local game (board,
+  side to move, mode, move history, and chosen difficulty) is saved to
+  `localStorage` after each move in hotseat and vs-computer modes. When an
+  unfinished local game is found on load, the menu offers a "Resume game" button
+  (`data-testid="resume-game"`) that restores it. The save is cleared when the
+  game ends or a new game starts. P2P games are never persisted. Serialization
+  and validation are pure, unit-tested helpers (`serializeGame` /
+  `deserializeGame`) that reject corrupt or invalid saved data and fall back to
+  no save.
+- **Scoreboard vs the computer** shown on the menu (`data-testid="scoreboard"`).
+  Tracks lifetime wins / losses / draws against the computer, with a
+  per-difficulty breakdown, stored in `localStorage` and updated when a
+  vs-computer game ends. Updates run through a pure, unit-tested
+  `updateScoreboard(record, result, difficulty)` helper.
+- **Stable `data-testid` attributes** for end-to-end testing: `mode-hotseat`,
+  `mode-cpu`, `resume-game`, `scoreboard`, the board container (`board`), and
+  each board cell (`cell-<row>-<col>`, 0-indexed).
 - **Hint button** in single-device modes (hotseat and vs-computer). It reuses the
   minimax engine to compute the best move for the side to move and highlights that
   square with a distinct pulsing marker, without playing it. Clicking Hint again or

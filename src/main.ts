@@ -19,6 +19,20 @@ import {
 import { chooseMove, bestMoveFor } from "./engine/ai.ts";
 import { PeerConnection, type ConnState } from "./net/connection.ts";
 import { validateReceivedMove, type NetMessage } from "./net/protocol.ts";
+import {
+  serializeGame,
+  parseSavedGame,
+  type SavedGame,
+  type SavedMode,
+} from "./lib/persistence.ts";
+import {
+  parseScoreboard,
+  updateScoreboard,
+  totalGames,
+  type Scoreboard,
+  type GameResult,
+  type Difficulty,
+} from "./lib/scoreboard.ts";
 
 type Mode = "menu" | "p2p" | "ai" | "hotseat";
 
@@ -45,6 +59,9 @@ interface State {
   // Hint (local modes only): the suggested square to highlight, plus a counter.
   hint: Position | null;
   hintCount: number;
+  // True once the current vs-computer game's result has been tallied, so the
+  // scoreboard is incremented exactly once per finished game.
+  scoreRecorded: boolean;
 }
 
 const app = document.getElementById("app")!;
@@ -62,6 +79,7 @@ const state: State = {
   aiThinking: false,
   hint: null,
   hintCount: 0,
+  scoreRecorded: false,
 };
 
 const AI_COLOR: Player = "W"; // human is Black by default in vs-computer
@@ -106,6 +124,87 @@ function loadDifficultyDepth(): number {
 
 let aiDepth = loadDifficultyDepth();
 
+/** Map the current search depth back to a difficulty id, for the scoreboard. */
+function currentDifficulty(): Difficulty {
+  const found = DIFFICULTIES.find((d) => d.depth === aiDepth);
+  return (found?.id as Difficulty) ?? "normal";
+}
+
+// ---------- saved game (resume) + scoreboard persistence ----------
+
+const SAVE_KEY = "p2p-reversi.savedGame";
+const SCOREBOARD_KEY = "p2p-reversi.scoreboard";
+
+/**
+ * Persist the current local game so it can be resumed later. Only hotseat and
+ * vs-computer games in progress are saved; serializeGame returns null (and we
+ * clear any stale save) for finished games or non-persistable modes. P2P games
+ * are never saved.
+ */
+function persistGame() {
+  if (state.mode !== "hotseat" && state.mode !== "ai") return;
+  const saved = serializeGame({
+    mode: state.mode as SavedMode,
+    board: state.board,
+    turn: state.turn,
+    lastMove: state.lastMove,
+    history: state.history,
+    aiDepth,
+  });
+  try {
+    if (saved) localStorage.setItem(SAVE_KEY, JSON.stringify(saved));
+    else localStorage.removeItem(SAVE_KEY);
+  } catch {
+    // Storage may be unavailable (private mode / quota). Resume is best-effort.
+  }
+}
+
+/** Remove any saved game (on game end, new game, or a fresh start). */
+function clearSavedGame() {
+  try {
+    localStorage.removeItem(SAVE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Load a previously saved, still-resumable local game (or null). */
+function loadSavedGame(): SavedGame | null {
+  try {
+    return parseSavedGame(localStorage.getItem(SAVE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function loadScoreboard(): Scoreboard {
+  try {
+    return parseScoreboard(localStorage.getItem(SCOREBOARD_KEY));
+  } catch {
+    return parseScoreboard(null);
+  }
+}
+
+function saveScoreboard(sb: Scoreboard) {
+  try {
+    localStorage.setItem(SCOREBOARD_KEY, JSON.stringify(sb));
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Record a finished vs-computer game in the scoreboard. The human plays Black,
+ * so a Black win is a win, a White win is a loss. Called exactly once per game
+ * end (guarded by `scoreRecorded`).
+ */
+function recordAiResult() {
+  const w = winner(state.board);
+  const result: GameResult = w === "draw" ? "draw" : w === state.myColor ? "win" : "loss";
+  const sb = updateScoreboard(loadScoreboard(), result, currentDifficulty());
+  saveScoreboard(sb);
+}
+
 // ---------- helpers ----------
 
 function resetGame() {
@@ -116,6 +215,7 @@ function resetGame() {
   state.history = [];
   state.hint = null;
   state.hintCount = 0;
+  state.scoreRecorded = false;
 }
 
 /**
@@ -184,6 +284,7 @@ function undoMove() {
   state.history = result.history;
   state.aiThinking = false;
   clearHint();
+  syncLocalPersistence();
   render();
 }
 
@@ -234,7 +335,27 @@ function localMakeMove(pos: Position, mover: Player) {
   state.board = applyMove(state.board, mover, pos);
   state.lastMove = pos;
   advanceTurn(mover);
+  syncLocalPersistence();
   render();
+}
+
+/**
+ * After a local move, keep localStorage in step: in single-device modes, save
+ * the in-progress game so it can be resumed, or — once the game is over —
+ * record the vs-computer result and drop the save. No-op in P2P.
+ */
+function syncLocalPersistence() {
+  if (state.mode !== "hotseat" && state.mode !== "ai") return;
+  const over = state.turn === null || isGameOver(state.board);
+  if (over) {
+    if (state.mode === "ai" && !state.scoreRecorded) {
+      recordAiResult();
+      state.scoreRecorded = true;
+    }
+    clearSavedGame();
+  } else {
+    persistGame();
+  }
 }
 
 /** Called when the human clicks a cell. */
@@ -377,9 +498,28 @@ function renderMenu() {
     ),
   );
 
+  // Offer to resume an unfinished local game, if one is saved.
+  const saved = loadSavedGame();
+  if (saved) {
+    const resumeCard = el("div", "card");
+    const resumeBtn = el("button", "mode-btn resume-btn") as HTMLButtonElement;
+    resumeBtn.dataset.testid = "resume-game";
+    resumeBtn.appendChild(el("span", "emoji", "▶️"));
+    const rtxt = el("div");
+    rtxt.appendChild(el("div", "mode-title", "Resume game"));
+    const modeLabel = saved.mode === "ai" ? "vs computer" : "two players";
+    rtxt.appendChild(
+      el("div", "mode-sub", `Continue your ${modeLabel} game in progress.`),
+    );
+    resumeBtn.appendChild(rtxt);
+    resumeBtn.onclick = resumeSavedGame;
+    resumeCard.appendChild(resumeBtn);
+    app.appendChild(resumeCard);
+  }
+
   const modes = el("div", "modes");
 
-  const defs: { mode: Mode; emoji: string; title: string; sub: string }[] = [
+  const defs: { mode: Mode; emoji: string; title: string; sub: string; testid?: string }[] = [
     {
       mode: "p2p",
       emoji: "🔗",
@@ -391,17 +531,20 @@ function renderMenu() {
       emoji: "🤖",
       title: "Play vs computer",
       sub: "Corner-weighted minimax. You play Black.",
+      testid: "mode-cpu",
     },
     {
       mode: "hotseat",
       emoji: "👥",
       title: "Two players (same device)",
       sub: "Take turns on this screen.",
+      testid: "mode-hotseat",
     },
   ];
 
   for (const d of defs) {
     const b = el("button", "mode-btn");
+    if (d.testid) b.dataset.testid = d.testid;
     b.appendChild(el("span", "emoji", d.emoji));
     const txt = el("div");
     txt.appendChild(el("div", "mode-title", d.title));
@@ -414,6 +557,8 @@ function renderMenu() {
   const card = el("div", "card");
   card.appendChild(modes);
   app.appendChild(card);
+
+  app.appendChild(renderScoreboardCard());
 
   app.appendChild(renderSettingsCard());
 
@@ -437,6 +582,53 @@ function renderMenu() {
   app.appendChild(explainerCard);
 
   app.appendChild(renderFooter());
+}
+
+/**
+ * Scoreboard card on the menu: lifetime wins / losses / draws vs the computer,
+ * with a per-difficulty breakdown. Tagged with `data-testid="scoreboard"`.
+ */
+function renderScoreboardCard(): HTMLElement {
+  const card = el("div", "card scoreboard-card");
+  card.dataset.testid = "scoreboard";
+
+  const header = el("div", "settings-row");
+  header.appendChild(el("span", "settings-label", "Your record vs computer"));
+  card.appendChild(header);
+
+  const sb = loadScoreboard();
+  const o = sb.overall;
+
+  if (totalGames(o) === 0) {
+    card.appendChild(
+      el("p", "hint-text", "No games yet — beat the computer to start your record."),
+    );
+    return card;
+  }
+
+  const tallies = el("div", "tallies");
+  const mk = (label: string, n: number, cls: string) => {
+    const t = el("div", `tally ${cls}`);
+    t.appendChild(el("div", "tally-num", String(n)));
+    t.appendChild(el("div", "tally-label", label));
+    return t;
+  };
+  tallies.appendChild(mk("Wins", o.wins, "win"));
+  tallies.appendChild(mk("Losses", o.losses, "loss"));
+  tallies.appendChild(mk("Draws", o.draws, "draw"));
+  card.appendChild(tallies);
+
+  const breakdown = el("div", "score-breakdown");
+  for (const d of DIFFICULTIES) {
+    const t = sb.byDifficulty[d.id as Difficulty];
+    if (totalGames(t) === 0) continue;
+    breakdown.appendChild(
+      el("div", "score-breakdown-row", `${d.label}: ${t.wins}W / ${t.losses}L / ${t.draws}D`),
+    );
+  }
+  if (breakdown.childElementCount > 0) card.appendChild(breakdown);
+
+  return card;
 }
 
 /** Settings card on the menu: board theme + AI difficulty, both persisted. */
@@ -488,19 +680,55 @@ function startMode(mode: Mode) {
   state.mode = mode;
   resetGame();
   state.aiThinking = false;
+  // Starting any fresh game discards a previously saved one.
+  clearSavedGame();
 
   if (mode === "ai") {
     state.myColor = "B"; // human plays black, moves first
+    persistGame();
     render();
     // If AI somehow moves first (it doesn't, B starts), this is a no-op.
     maybeRunAI();
   } else if (mode === "hotseat") {
     state.myColor = null;
+    persistGame();
     render();
   } else if (mode === "p2p") {
     state.myColor = null;
     render();
   }
+}
+
+/** Restore a saved local game and jump straight into it. */
+function resumeSavedGame() {
+  const saved = loadSavedGame();
+  if (!saved) {
+    render();
+    return;
+  }
+  state.mode = saved.mode;
+  state.board = saved.board.slice();
+  state.turn = saved.turn;
+  state.lastMove = saved.lastMove;
+  state.flipped = new Set();
+  state.history = saved.history.map((h) => ({
+    board: h.board.slice(),
+    turn: h.turn,
+    lastMove: h.lastMove,
+  }));
+  state.hint = null;
+  state.hintCount = 0;
+  state.scoreRecorded = false;
+  state.aiThinking = false;
+  if (saved.mode === "ai") {
+    state.myColor = "B";
+    aiDepth = saved.aiDepth;
+  } else {
+    state.myColor = null;
+  }
+  render();
+  // If it is the computer's turn on resume, let it move.
+  if (saved.mode === "ai") maybeRunAI();
 }
 
 function backToMenu() {
@@ -792,6 +1020,7 @@ function renderGame() {
   // board
   const wrap = el("div", "board-wrap");
   const boardEl = el("div", "board");
+  boardEl.dataset.testid = "board";
   const myTurn = isMyTurn();
   const moves = state.turn ? legalMoves(state.board, state.turn) : [];
   const moveSet = new Set(moves.map((m) => index(m.row, m.col)));
@@ -800,6 +1029,9 @@ function renderGame() {
     for (let c = 0; c < SIZE; c++) {
       const i = index(r, c);
       const cell = el("div", "cell");
+      // Stable e2e hook: every cell is addressable as cell-<row>-<col> (0-indexed).
+      // A cell is clickable only when it carries the "playable" class.
+      cell.dataset.testid = `cell-${r}-${c}`;
       const occupant = state.board[i];
 
       const isLast =
@@ -901,6 +1133,10 @@ function renderGameOverBanner(): HTMLElement {
     resetGame();
     if (state.mode === "p2p" && state.conn?.isOpen) {
       state.conn.send({ t: "rematch", v: 1 });
+    } else {
+      // A fresh local game: drop the (finished) save and start a new one.
+      clearSavedGame();
+      persistGame();
     }
     render();
     if (state.mode === "ai") maybeRunAI();
